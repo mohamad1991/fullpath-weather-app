@@ -1,7 +1,7 @@
 # Local kind cluster (infra/environments/local). Images from GHCR.
 image:
   registry: ghcr.io/mohamad1991/fullpath-weather-app
-  tag: set-by-ci # bumped automatically by CI on every merge to main
+  tag: 8b6cf5b3c9b67212ac0b5c2abe0bee0046b0b11c # bumped automatically by CI on every merge to main
 imagePullSecrets:
   - name: ghcr-pull # created by Terraform (infra/environments/local)
 database:

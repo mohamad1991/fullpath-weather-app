@@ -1,7 +1,7 @@
 # AWS dev. Values marked (tf) come from `terraform output helm_values` in infra/environments/dev.
 image:
   registry: 123456789012.dkr.ecr.eu-west-1.amazonaws.com/weather
-  tag: set-by-ci # bumped automatically by CI on every merge to main
+  tag: 8b6cf5b3c9b67212ac0b5c2abe0bee0046b0b11c # bumped automatically by CI on every merge to main
 database:
   secretName: weather-db
   externalSecret:
@@ -25,6 +25,6 @@ networkPolicy:
 serviceMonitor:
   enabled: true
 api:
-  autoscaling: { minReplicas: 2, maxReplicas: 4 }
+  autoscaling: {minReplicas: 2, maxReplicas: 4}
 frontend:
-  autoscaling: { minReplicas: 2, maxReplicas: 3 }
+  autoscaling: {minReplicas: 2, maxReplicas: 3}
