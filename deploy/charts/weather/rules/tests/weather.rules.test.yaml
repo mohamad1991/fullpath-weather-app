@@ -1,0 +1,113 @@
+# promtool unit tests: `promtool test rules deploy/charts/weather/rules/tests/*.yaml`
+# Each case feeds synthetic series and asserts which alerts fire (and which don't).
+rule_files:
+  - ../weather.rules.yaml
+evaluation_interval: 1m
+
+tests:
+  # 10% of /api requests fail for over an hour -> fast burn pages.
+  - name: fast burn fires on sustained 10% errors
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{job="weather-api",route="/api/weather/current",status="200"}'
+        values: '0+90x90'
+      - series: 'http_requests_total{job="weather-api",route="/api/weather/current",status="500"}'
+        values: '0+10x90'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: WeatherAPIErrorBudgetBurnFast
+        exp_alerts:
+          - exp_labels: { severity: critical, team: weather }
+            exp_annotations:
+              summary: API is burning its error budget fast
+              description: '10% of /api requests are failing (5m window).'
+              runbook_url: https://github.com/mohamad1991/fullpath-weather-app/blob/main/docs/runbooks/WeatherAPIErrorBudgetBurn.md
+
+  # 0.1% errors is inside the 0.5% budget -> silence. Health/metrics routes never count.
+  - name: no alert within budget, probes excluded
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{job="weather-api",route="/api/weather/current",status="200"}'
+        values: '0+999x90'
+      - series: 'http_requests_total{job="weather-api",route="/api/weather/current",status="500"}'
+        values: '0+1x90'
+      - series: 'http_requests_total{job="weather-api",route="/readyz",status="503"}'
+        values: '0+500x90'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: WeatherAPIErrorBudgetBurnFast
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: WeatherAPIErrorBudgetBurnSlow
+        exp_alerts: []
+
+  # Tel Aviv's newest observation is frozen at t=0; Berlin keeps up. Only Tel Aviv alerts.
+  - name: stale data per location
+    interval: 1m
+    input_series:
+      - series: 'weather_latest_observation_timestamp_seconds{job="weather-api",pod="api-a",location="Tel Aviv"}'
+        values: '0x90'
+      - series: 'weather_latest_observation_timestamp_seconds{job="weather-api",pod="api-a",location="Berlin"}'
+        values: '0+60x90'
+    alert_rule_test:
+      - eval_time: 55m
+        alertname: WeatherDataStale
+        exp_alerts: []
+      - eval_time: 80m
+        alertname: WeatherDataStale
+        exp_alerts:
+          - exp_labels: { severity: warning, team: weather, location: Tel Aviv }
+            exp_annotations:
+              summary: Weather data for Tel Aviv is stale
+              description: Newest observation is 1h 20m 0s old.
+              runbook_url: https://github.com/mohamad1991/fullpath-weather-app/blob/main/docs/runbooks/WeatherDataStale.md
+      - eval_time: 80m
+        alertname: WeatherDataStaleCritical
+        exp_alerts: []
+
+  - name: collector failing after a failed run
+    interval: 1m
+    input_series:
+      - series: 'kube_cronjob_status_last_schedule_time{namespace="weather",cronjob="weather-collector"}'
+        values: '900x20'
+      - series: 'kube_cronjob_status_last_successful_time{namespace="weather",cronjob="weather-collector"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: WeatherCollectorFailing
+        exp_alerts:
+          - exp_labels: { severity: warning, team: weather, namespace: weather, cronjob: weather-collector }
+            exp_annotations:
+              summary: The latest weather collector run did not succeed
+              description: Last scheduled run is 15m 0s newer than the last success.
+              runbook_url: https://github.com/mohamad1991/fullpath-weather-app/blob/main/docs/runbooks/WeatherCollectorFailing.md
+
+  - name: collector healthy after a successful run
+    interval: 1m
+    input_series:
+      - series: 'kube_cronjob_status_last_schedule_time{namespace="weather",cronjob="weather-collector"}'
+        values: '900x20'
+      - series: 'kube_cronjob_status_last_successful_time{namespace="weather",cronjob="weather-collector"}'
+        values: '903x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: WeatherCollectorFailing
+        exp_alerts: []
+
+  - name: api unavailable when no replicas are ready
+    interval: 1m
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{namespace="weather",deployment="weather-api"}'
+        values: '2x5 0x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: WeatherAPIUnavailable
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: WeatherAPIUnavailable
+        exp_alerts:
+          - exp_labels: { severity: critical, team: weather, namespace: weather, deployment: weather-api }
+            exp_annotations:
+              summary: No ready weather-api pods
+              description: All API replicas are unavailable - users get errors.
+              runbook_url: https://github.com/mohamad1991/fullpath-weather-app/blob/main/docs/runbooks/WeatherAPIUnavailable.md

@@ -2,6 +2,13 @@
 # and "works in CI" mean the same thing.
 SHELL      := /bin/bash
 export PATH := $(CURDIR)/.bin:$(PATH)
+# Resolve tools to absolute paths once. Make runs simple one-line recipes WITHOUT a
+# shell, using its original PATH - so the export above alone would silently pick
+# e.g. an old Homebrew terraform instead of the pinned one in .bin/.
+which_tool = $(firstword $(wildcard $(CURDIR)/.bin/$(1)) $(shell command -v $(1)))
+TERRAFORM  := $(call which_tool,terraform)
+KUBECTL    := $(call which_tool,kubectl)
+PROMTOOL   := $(call which_tool,promtool)
 CLUSTER    ?= weather
 TAG        ?= dev
 LOCAL_ENV  := infra/environments/local
@@ -40,8 +47,8 @@ test: ## Lint + unit/integration tests (needs `docker compose up -d db`)
 # --- Local Kubernetes (kind, provisioned by Terraform) --------------------------------
 .PHONY: local-up
 local-up: ## Create kind cluster + platform (Traefik, CNPG, metrics-server, Postgres)
-	terraform -chdir=$(LOCAL_ENV) init -input=false
-	terraform -chdir=$(LOCAL_ENV) apply -input=false -auto-approve
+	$(TERRAFORM) -chdir=$(LOCAL_ENV) init -input=false
+	$(TERRAFORM) -chdir=$(LOCAL_ENV) apply -input=false -auto-approve
 
 .PHONY: local-images
 local-images: ## Build images and load them into kind
@@ -50,26 +57,31 @@ local-images: ## Build images and load them into kind
 	done
 
 .PHONY: local-deploy
-local-deploy: local-images ## Helm-deploy the app to kind (Argo CD replaces this in Phase 4)
+local-deploy: local-images ## Offline fallback: Helm-deploy local images (normally Argo CD deploys)
 	helm --kube-context $(KCTX) upgrade --install weather $(CHART) -n weather \
 	  -f $(CHART)/ci/local-values.yaml --set image.tag=$(TAG) --wait --timeout 5m
 	@echo "App: http://localhost:8088"
 
 .PHONY: local-verify
 local-verify: ## Prove NetworkPolicies are enforced
-	kubectl config use-context $(KCTX) >/dev/null && scripts/verify-netpol.sh
+	$(KUBECTL) config use-context $(KCTX) >/dev/null && scripts/verify-netpol.sh
 
 .PHONY: local-down
 local-down: ## Destroy the local cluster
-	terraform -chdir=$(LOCAL_ENV) destroy -input=false -auto-approve
+	$(TERRAFORM) -chdir=$(LOCAL_ENV) destroy -input=false -auto-approve
 
 # --- Static checks (same as CI) --------------------------------------------------------
+.PHONY: test-alerts
+test-alerts: ## Unit-test Prometheus alert rules with promtool
+	$(PROMTOOL) check rules deploy/charts/weather/rules/weather.rules.yaml
+	$(PROMTOOL) test rules deploy/charts/weather/rules/tests/*.yaml
+	scripts/check-runbooks.sh
+
 .PHONY: lint-infra
 lint-infra: ## terraform fmt/validate + helm lint + checkov
-	terraform fmt -check -recursive infra
+	$(TERRAFORM) fmt -check -recursive infra
 	for d in infra/bootstrap infra/global infra/environments/*/; do \
-	  terraform -chdir=$$d init -backend=false -input=false >/dev/null && terraform -chdir=$$d validate || exit 1; \
+	  $(TERRAFORM) -chdir=$$d init -backend=false -input=false >/dev/null && $(TERRAFORM) -chdir=$$d validate || exit 1; \
 	done
-	helm lint $(CHART) -f $(CHART)/ci/local-values.yaml --strict
-	helm lint $(CHART) -f $(CHART)/ci/aws-values.yaml --strict
+	for env in local dev prod; do helm lint $(CHART) -f deploy/environments/$$env/values.yaml --set image.tag=lint --strict || exit 1; done
 	.venv-tools/bin/checkov -d infra --framework terraform --quiet --compact --skip-download --skip-path '\.terraform'

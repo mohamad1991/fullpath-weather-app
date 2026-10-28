@@ -1,0 +1,11 @@
+{{- if .Values.prometheusRule.enabled }}
+# Rules live in rules/weather.rules.yaml (plain Prometheus format) so CI can unit-test
+# the exact file with promtool. Requires the Prometheus Operator CRDs.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "weather.fullname" . }}
+  labels: {{- include "weather.labels" (dict "ctx" $ "component" "monitoring") | nindent 4 }}
+spec:
+{{ .Files.Get "rules/weather.rules.yaml" | indent 2 }}
+{{- end }}

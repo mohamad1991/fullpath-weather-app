@@ -3,7 +3,8 @@ import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query, Response
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, Counter, Histogram, generate_latest
+from prometheus_client.core import GaugeMetricFamily
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 from starlette.requests import Request
@@ -17,6 +18,52 @@ REQUESTS = Counter("http_requests_total", "HTTP requests", ["method", "route", "
 LATENCY = Histogram("http_request_duration_seconds", "HTTP request latency", ["method", "route"])
 
 pool: ConnectionPool | None = None
+
+
+class ScrapeTimeCollector:
+    """Metrics computed when Prometheus scrapes, not on the request path.
+
+    - Data freshness: newest observation per location, exported as a *timestamp* so
+      PromQL computes age with time() - x (an "age" gauge would be stale between scrapes).
+      This is what catches a silently broken collector: no errors anywhere, just old data.
+    - Pool saturation: in-use vs max connections and waiting requests (USE method).
+    """
+
+    def collect(self):
+        if pool is None:
+            return
+        stats = pool.get_stats()
+        size = GaugeMetricFamily("weather_db_pool_connections", "Connections in the pool", labels=["state"])
+        size.add_metric(["total"], stats.get("pool_size", 0))
+        size.add_metric(["idle"], stats.get("pool_available", 0))
+        size.add_metric(["max"], config.POOL_MAX)
+        yield size
+        yield GaugeMetricFamily(
+            "weather_db_pool_requests_waiting",
+            "Requests waiting for a connection",
+            value=stats.get("requests_waiting", 0),
+        )
+
+        fresh = GaugeMetricFamily(
+            "weather_latest_observation_timestamp_seconds",
+            "Unix time of the newest stored observation per location",
+            labels=["location"],
+        )
+        try:
+            with pool.connection(timeout=2) as conn:
+                rows = conn.execute(
+                    "SELECT l.name, extract(epoch FROM max(o.observed_at))::float8 AS ts"
+                    " FROM locations l JOIN weather_observations o ON o.location_id = l.id GROUP BY l.name"
+                ).fetchall()
+        except Exception as exc:  # noqa: BLE001 - a scrape must never crash on DB trouble
+            log.warning("freshness metric unavailable: %s", exc)
+            return  # series disappear -> absent()/staleness alerts cover it
+        for r in rows:
+            fresh.add_metric([r["name"]], r["ts"])
+        yield fresh
+
+
+REGISTRY.register(ScrapeTimeCollector())
 
 
 @asynccontextmanager

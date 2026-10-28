@@ -1,0 +1,14 @@
+{{- if .Values.grafanaDashboard.enabled }}
+# Dashboard as code: Grafana's sidecar loads ConfigMaps labelled grafana_dashboard=1.
+# Edits in the UI are not persisted - change dashboards/*.json in Git instead.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "weather.fullname" . }}-dashboards
+  labels:
+    {{- include "weather.labels" (dict "ctx" $ "component" "monitoring") | nindent 4 }}
+    grafana_dashboard: "1"
+data:
+  weather-overview.json: |-
+{{ .Files.Get "dashboards/weather-overview.json" | indent 4 }}
+{{- end }}

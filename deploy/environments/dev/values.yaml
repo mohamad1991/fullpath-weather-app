@@ -24,6 +24,10 @@ networkPolicy:
   databaseCIDRs: ["10.10.100.0/24", "10.10.101.0/24", "10.10.102.0/24"] # (tf)
 serviceMonitor:
   enabled: true
+prometheusRule:
+  enabled: true
+grafanaDashboard:
+  enabled: true
 api:
   autoscaling: {minReplicas: 2, maxReplicas: 4}
 frontend:

@@ -1,0 +1,168 @@
+# Weather app alerting + recording rules.
+# - Wrapped into a PrometheusRule by templates/prometheusrule.yaml (versioned WITH the app).
+# - Unit-tested by `promtool test rules rules/tests/*.yaml` in CI - the same file.
+# Principles: alert on symptoms users feel (errors, latency, stale data), not causes;
+# every alert has a severity, an owner and a runbook.
+#
+# Labels assume release name "weather" (job="weather-api" comes from the Service name).
+groups:
+  # --- SLI recording rules -------------------------------------------------------------
+  # SLO: 99.5% of /api/* requests succeed (non-5xx) over 30 days -> error budget 0.5%.
+  - name: weather-slo.recording
+    rules:
+      - record: weather:api_request_errors:ratio_rate5m
+        expr: |
+          sum(rate(http_requests_total{job="weather-api",route=~"/api/.*",status=~"5.."}[5m]))
+          /
+          sum(rate(http_requests_total{job="weather-api",route=~"/api/.*"}[5m]))
+      - record: weather:api_request_errors:ratio_rate30m
+        expr: |
+          sum(rate(http_requests_total{job="weather-api",route=~"/api/.*",status=~"5.."}[30m]))
+          /
+          sum(rate(http_requests_total{job="weather-api",route=~"/api/.*"}[30m]))
+      - record: weather:api_request_errors:ratio_rate1h
+        expr: |
+          sum(rate(http_requests_total{job="weather-api",route=~"/api/.*",status=~"5.."}[1h]))
+          /
+          sum(rate(http_requests_total{job="weather-api",route=~"/api/.*"}[1h]))
+      - record: weather:api_request_errors:ratio_rate6h
+        expr: |
+          sum(rate(http_requests_total{job="weather-api",route=~"/api/.*",status=~"5.."}[6h]))
+          /
+          sum(rate(http_requests_total{job="weather-api",route=~"/api/.*"}[6h]))
+      - record: weather:api_request_duration_seconds:p95_rate5m
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(http_request_duration_seconds_bucket{job="weather-api",route=~"/api/.*"}[5m])))
+
+  # --- SLO burn-rate alerts (multi-window, multi-burn-rate; Google SRE workbook) -----------
+  - name: weather-slo.alerts
+    rules:
+      - alert: WeatherAPIErrorBudgetBurnFast
+        # 14.4x burn for 1h = 2% of the monthly budget gone in an hour. The 5m window makes
+        # the alert stop quickly once the problem is fixed.
+        expr: |
+          weather:api_request_errors:ratio_rate1h > (14.4 * 0.005)
+          and
+          weather:api_request_errors:ratio_rate5m > (14.4 * 0.005)
+        for: 2m
+        labels:
+          severity: critical
+          team: weather
+        annotations:
+          summary: API is burning its error budget fast
+          description: '{{ $value | humanizePercentage }} of /api requests are failing (5m window).'
+          runbook_url: https://github.com/mohamad1991/fullpath-weather-app/blob/main/docs/runbooks/WeatherAPIErrorBudgetBurn.md
+
+      - alert: WeatherAPIErrorBudgetBurnSlow
+        # 6x burn for 6h = 5% of the budget. Not an emergency, but a ticket for today.
+        expr: |
+          weather:api_request_errors:ratio_rate6h > (6 * 0.005)
+          and
+          weather:api_request_errors:ratio_rate30m > (6 * 0.005)
+        for: 15m
+        labels:
+          severity: warning
+          team: weather
+        annotations:
+          summary: API is steadily burning its error budget
+          description: '{{ $value | humanizePercentage }} of /api requests failing (30m window).'
+          runbook_url: https://github.com/mohamad1991/fullpath-weather-app/blob/main/docs/runbooks/WeatherAPIErrorBudgetBurn.md
+
+      - alert: WeatherAPILatencyHigh
+        # Latency SLO: p95 of /api requests under 500ms.
+        expr: weather:api_request_duration_seconds:p95_rate5m > 0.5
+        for: 10m
+        labels:
+          severity: warning
+          team: weather
+        annotations:
+          summary: API p95 latency above 500ms
+          description: 'p95 is {{ $value | humanizeDuration }}.'
+          runbook_url: https://github.com/mohamad1991/fullpath-weather-app/blob/main/docs/runbooks/WeatherAPILatencyHigh.md
+
+      - alert: WeatherAPIUnavailable
+        # No ready API pods = 100% errors at the edge. The API's own metrics can't see this
+        # (nothing is running to count failures), so watch it from kube-state-metrics.
+        expr: |
+          kube_deployment_status_replicas_available{namespace="weather",deployment="weather-api"} == 0
+          or
+          absent(kube_deployment_status_replicas_available{namespace="weather",deployment="weather-api"})
+        for: 2m
+        labels:
+          severity: critical
+          team: weather
+        annotations:
+          summary: No ready weather-api pods
+          description: All API replicas are unavailable - users get errors.
+          runbook_url: https://github.com/mohamad1991/fullpath-weather-app/blob/main/docs/runbooks/WeatherAPIUnavailable.md
+
+  # --- Data quality: the failure mode with no errors anywhere ------------------------------
+  - name: weather-data.alerts
+    rules:
+      - alert: WeatherDataStale
+        # Collector runs every 15m; > 1h old = several runs missed.
+        expr: (time() - max by (location) (weather_latest_observation_timestamp_seconds)) > 3600
+        for: 10m
+        labels:
+          severity: warning
+          team: weather
+        annotations:
+          summary: 'Weather data for {{ $labels.location }} is stale'
+          description: 'Newest observation is {{ $value | humanizeDuration }} old.'
+          runbook_url: https://github.com/mohamad1991/fullpath-weather-app/blob/main/docs/runbooks/WeatherDataStale.md
+
+      - alert: WeatherDataStaleCritical
+        expr: (time() - max by (location) (weather_latest_observation_timestamp_seconds)) > 10800
+        for: 10m
+        labels:
+          severity: critical
+          team: weather
+        annotations:
+          summary: 'Weather data for {{ $labels.location }} is over 3h old'
+          description: 'Newest observation is {{ $value | humanizeDuration }} old - users see outdated weather.'
+          runbook_url: https://github.com/mohamad1991/fullpath-weather-app/blob/main/docs/runbooks/WeatherDataStale.md
+
+      - alert: WeatherCollectorFailing
+        # Most recent scheduled run has not succeeded (cause-level signal; pairs with WeatherDataStale).
+        expr: |
+          (
+            kube_cronjob_status_last_schedule_time{namespace="weather",cronjob="weather-collector"}
+            - kube_cronjob_status_last_successful_time{namespace="weather",cronjob="weather-collector"}
+          ) > 0
+        for: 5m
+        labels:
+          severity: warning
+          team: weather
+        annotations:
+          summary: The latest weather collector run did not succeed
+          description: 'Last scheduled run is {{ $value | humanizeDuration }} newer than the last success.'
+          runbook_url: https://github.com/mohamad1991/fullpath-weather-app/blob/main/docs/runbooks/WeatherCollectorFailing.md
+
+  # --- Saturation --------------------------------------------------------------------------
+  - name: weather-capacity.alerts
+    rules:
+      - alert: WeatherAPIAtMaxReplicas
+        expr: |
+          kube_horizontalpodautoscaler_status_current_replicas{namespace="weather",horizontalpodautoscaler="weather-api"}
+          >= on (namespace, horizontalpodautoscaler)
+          kube_horizontalpodautoscaler_spec_max_replicas{namespace="weather",horizontalpodautoscaler="weather-api"}
+        for: 15m
+        labels:
+          severity: warning
+          team: weather
+        annotations:
+          summary: API autoscaler pinned at max replicas
+          description: HPA cannot add capacity - raise maxReplicas or investigate the load.
+          runbook_url: https://github.com/mohamad1991/fullpath-weather-app/blob/main/docs/runbooks/WeatherAPIAtMaxReplicas.md
+
+      - alert: WeatherDBPoolSaturated
+        expr: max by (pod) (weather_db_pool_requests_waiting{job="weather-api"}) > 0
+        for: 10m
+        labels:
+          severity: warning
+          team: weather
+        annotations:
+          summary: 'API pod {{ $labels.pod }} is waiting for DB connections'
+          description: Requests queue for a pooled connection - DB slow or pool too small.
+          runbook_url: https://github.com/mohamad1991/fullpath-weather-app/blob/main/docs/runbooks/WeatherDBPoolSaturated.md

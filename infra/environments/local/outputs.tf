@@ -14,3 +14,12 @@ output "database_secret" {
 output "argocd" {
   value = "kubectl -n argocd port-forward svc/argocd-server 8443:80  ->  http://localhost:8443  (admin / `kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d`)"
 }
+
+output "grafana" {
+  value = "kubectl -n monitoring port-forward svc/kps-grafana 3000:80  ->  http://localhost:3000  (admin / terraform output -raw grafana_admin_password)"
+}
+
+output "grafana_admin_password" {
+  value     = module.observability.grafana_admin_password
+  sensitive = true
+}

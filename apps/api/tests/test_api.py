@@ -72,3 +72,11 @@ def test_metrics_exposed(client):
     client.get("/api/locations")
     body = client.get("/metrics").text
     assert 'http_requests_total{method="GET",route="/api/locations",status="200"}' in body
+
+
+def test_freshness_and_pool_metrics(client):
+    body = client.get("/metrics").text
+    assert 'weather_latest_observation_timestamp_seconds{location="Tel Aviv"}' in body
+    assert 'weather_latest_observation_timestamp_seconds{location="London"}' in body
+    assert 'weather_db_pool_connections{state="max"} 10.0' in body
+    assert "weather_db_pool_requests_waiting" in body

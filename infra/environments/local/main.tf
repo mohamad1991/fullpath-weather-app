@@ -201,3 +201,21 @@ resource "helm_release" "argocd_root" {
 
   depends_on = [kubernetes_secret_v1.argocd_repo, helm_release.database]
 }
+
+# --- Observability --------------------------------------------------------------------
+
+module "observability" {
+  source = "../../modules/observability"
+
+  storage_class        = "standard" # kind's local-path provisioner
+  prometheus_retention = "2d"
+}
+
+resource "helm_release" "database_monitoring" {
+  name      = "weather-db-monitoring"
+  namespace = kubernetes_namespace_v1.app.metadata[0].name
+  chart     = "${path.module}/../../charts/manifests"
+  values    = [templatefile("${path.module}/manifests/database-monitoring.yaml.tftpl", { db_instances = var.db_instances })]
+
+  depends_on = [module.observability, helm_release.database]
+}

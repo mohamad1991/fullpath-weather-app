@@ -44,9 +44,14 @@ networkPolicy:
     namespaceSelector: {}   # {} = same namespace
     podSelector: { cnpg.io/cluster: weather-db }
 
+# Observability (require the Prometheus Operator CRDs from kube-prometheus-stack).
 serviceMonitor:
-  enabled: false            # requires Prometheus Operator CRDs (Phase 5)
+  enabled: false
   interval: 30s
+prometheusRule:
+  enabled: false            # alerts + SLO recording rules from rules/weather.rules.yaml
+grafanaDashboard:
+  enabled: false            # dashboards/*.json -> ConfigMap picked up by the Grafana sidecar
 
 api:
   enabled: true

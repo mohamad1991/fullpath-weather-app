@@ -1,0 +1,39 @@
+# CloudNativePG metrics + alerts (local DB backend only; on AWS the DB is RDS and is
+# covered by CloudWatch alarms in modules/database). Rendered by Terraform templatefile().
+manifests:
+  - apiVersion: monitoring.coreos.com/v1
+    kind: PodMonitor
+    metadata:
+      name: weather-db
+    spec:
+      selector:
+        matchLabels:
+          cnpg.io/cluster: weather-db
+      podMetricsEndpoints:
+        - port: metrics
+  - apiVersion: monitoring.coreos.com/v1
+    kind: PrometheusRule
+    metadata:
+      name: weather-db
+    spec:
+      groups:
+        - name: weather-db.alerts
+          rules:
+            - alert: WeatherDBInstanceDown
+              expr: cnpg_collector_up{namespace="weather"} == 0 or count(cnpg_collector_up{namespace="weather"}) < ${db_instances}
+              for: 2m
+              labels:
+                severity: critical
+                team: weather
+              annotations:
+                summary: A Postgres instance is down
+                runbook_url: https://github.com/mohamad1991/fullpath-weather-app/blob/main/docs/runbooks/WeatherDBInstanceDown.md
+            - alert: WeatherDBReplicationLag
+              expr: max(cnpg_pg_replication_lag{namespace="weather"}) > 30
+              for: 5m
+              labels:
+                severity: warning
+                team: weather
+              annotations:
+                summary: 'Postgres replica is {{ $value }}s behind - a failover now would lose data'
+                runbook_url: https://github.com/mohamad1991/fullpath-weather-app/blob/main/docs/runbooks/WeatherDBReplicationLag.md
