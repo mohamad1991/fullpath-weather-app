@@ -1,7 +1,7 @@
 # AWS dev. Values marked (tf) come from `terraform output helm_values` in infra/environments/dev.
 image:
   registry: 123456789012.dkr.ecr.eu-west-1.amazonaws.com/weather
-  tag: 8b6cf5b3c9b67212ac0b5c2abe0bee0046b0b11c # bumped automatically by CI on every merge to main
+  tag: 753b4d7462abbf14943f6243a389a05be1d96e6b # bumped automatically by CI on every merge to main
 database:
   secretName: weather-db
   externalSecret:
