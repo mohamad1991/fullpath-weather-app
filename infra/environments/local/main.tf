@@ -58,11 +58,23 @@ resource "helm_release" "traefik" {
   wait             = true
 
   values = [yamlencode({
-    ports        = { web = { hostPort = 80 } }
-    service      = { spec = { type = "ClusterIP" } } # chart >=40 moved this under spec
-    nodeSelector = { "ingress-ready" = "true" }
-    tolerations  = [{ key = "node-role.kubernetes.io/control-plane", effect = "NoSchedule" }]
-    ingressClass = { enabled = true, isDefaultClass = false }
+    ports = { web = { hostPort = 80 } }
+    # hostPort + one ingress node: a surge pod can never schedule (port taken by the
+    # old pod) and the rollout deadlocks. Replace in place instead (brief local blip).
+    updateStrategy = { type = "RollingUpdate", rollingUpdate = { maxSurge = 0, maxUnavailable = 1 } }
+    service        = { spec = { type = "ClusterIP" } } # chart >=40 moved this under spec
+    nodeSelector   = { "ingress-ready" = "true" }
+    tolerations    = [{ key = "node-role.kubernetes.io/control-plane", effect = "NoSchedule" }]
+    ingressClass   = { enabled = true, isDefaultClass = false }
+    # A ClusterIP Service has no external address to copy into Ingress status, and
+    # Argo CD reports an Ingress without one as Progressing forever. On kind the real
+    # entry point is localhost (hostPort), so publish that.
+    providers = {
+      kubernetesIngress = {
+        publishedService = { enabled = false }
+        ingressEndpoint  = { hostname = "localhost" }
+      }
+    }
   })]
 }
 

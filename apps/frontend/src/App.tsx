@@ -32,7 +32,7 @@ export default function App() {
     <main>
       <header>
         <h1>World Weather</h1>
-        <span className="muted">Updates every minute</span>
+        <span className="muted">Live data · refreshes every minute</span>
       </header>
       {error && <div className="error">Could not load weather: {error}</div>}
       <section className="grid">
