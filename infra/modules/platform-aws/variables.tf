@@ -94,3 +94,10 @@ variable "gitops_deploy_key_secret" {
   type        = string
   default     = "argocd/weather-deploy-key"
 }
+
+variable "slack_webhook_url" {
+  description = "Alertmanager Slack webhook. Pass via TF_VAR_slack_webhook_url, never in files."
+  type        = string
+  default     = ""
+  sensitive   = true
+}

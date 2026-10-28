@@ -215,7 +215,10 @@ resource "helm_release" "database_monitoring" {
   name      = "weather-db-monitoring"
   namespace = kubernetes_namespace_v1.app.metadata[0].name
   chart     = "${path.module}/../../charts/manifests"
-  values    = [templatefile("${path.module}/manifests/database-monitoring.yaml.tftpl", { db_instances = var.db_instances })]
+  values = [templatefile("${path.module}/manifests/database-monitoring.yaml.tftpl", {
+    # jsonencode = valid inline YAML, so no indentation games with the embedded file.
+    rules = jsonencode(yamldecode(templatefile("${path.module}/rules/database.rules.yaml", { db_instances = var.db_instances })))
+  })]
 
   depends_on = [module.observability, helm_release.database]
 }

@@ -44,6 +44,9 @@ jobs:
               - 'deploy/**'
               - 'docs/runbooks/**'
               - 'infra/environments/local/manifests/**'
+              - 'infra/environments/local/rules/**'
+              - 'scripts/test-alerts.sh'
+              - 'scripts/check-runbooks.sh'
               - '.github/workflows/ci.yml'
 
   test-python:
@@ -122,10 +125,7 @@ jobs:
           curl -fsSLO https://github.com/prometheus/prometheus/releases/download/v$V/$F
           curl -fsSL https://github.com/prometheus/prometheus/releases/download/v$V/sha256sums.txt | grep " $F\$" | sha256sum -c
           tar -xzf $F --strip-components=1 prometheus-$V.linux-amd64/promtool
-          ./promtool check rules deploy/charts/weather/rules/weather.rules.yaml
-          ./promtool test rules deploy/charts/weather/rules/tests/*.yaml
-      - name: Every alert links an existing runbook
-        run: scripts/check-runbooks.sh
+          PROMTOOL=$PWD/promtool scripts/test-alerts.sh   # also checks every alert has a runbook
       - name: Lint + schema-validate every environment
         run: |
           for env in local dev prod; do

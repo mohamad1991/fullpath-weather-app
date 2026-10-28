@@ -3,7 +3,7 @@
 # alert without one - a broken link at 3am is worse than no link.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-files=(deploy/charts/weather/rules/weather.rules.yaml infra/environments/local/manifests/*.tftpl)
+files=(deploy/charts/weather/rules/weather.rules.yaml infra/environments/local/rules/*.yaml)
 rc=0
 alerts=$(grep -hc -- "- alert:" "${files[@]}" | paste -sd+ - | bc)
 links=$(grep -hc "runbook_url:" "${files[@]}" | paste -sd+ - | bc)

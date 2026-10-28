@@ -73,9 +73,7 @@ local-down: ## Destroy the local cluster
 # --- Static checks (same as CI) --------------------------------------------------------
 .PHONY: test-alerts
 test-alerts: ## Unit-test Prometheus alert rules with promtool
-	$(PROMTOOL) check rules deploy/charts/weather/rules/weather.rules.yaml
-	$(PROMTOOL) test rules deploy/charts/weather/rules/tests/*.yaml
-	scripts/check-runbooks.sh
+	PROMTOOL=$(PROMTOOL) scripts/test-alerts.sh
 
 .PHONY: lint-infra
 lint-infra: ## terraform fmt/validate + helm lint + checkov

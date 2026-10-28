@@ -24,3 +24,4 @@ crash.log
 .env
 kubeconfig*
 .bin/
+*.rendered.yaml

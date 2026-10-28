@@ -57,6 +57,14 @@ module "eks" {
       # Without this, NetworkPolicies are accepted by the API but NOT enforced.
       configuration_values = jsonencode({ enableNetworkPolicy = "true" })
     }
+    # EBS volumes for PVCs (Prometheus, Loki). Not installed by default on EKS: without
+    # it every PVC stays Pending.
+    aws-ebs-csi-driver = {
+      pod_identity_association = [{
+        role_arn        = module.ebs_csi_identity.iam_role_arn
+        service_account = "ebs-csi-controller-sa"
+      }]
+    }
   }
 
   eks_managed_node_groups = {
@@ -99,4 +107,14 @@ module "karpenter" {
   }
 
   tags = var.tags
+}
+
+module "ebs_csi_identity" {
+  #checkov:skip=CKV_TF_1:Registry module pinned to an exact version; hashes are for git sources
+  source  = "terraform-aws-modules/eks-pod-identity/aws"
+  version = "2.10.0"
+
+  name                      = "${var.name}-ebs-csi"
+  attach_aws_ebs_csi_policy = true
+  tags                      = var.tags
 }
