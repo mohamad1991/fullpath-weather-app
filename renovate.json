@@ -1,0 +1,32 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests",
+    ":semanticCommits"
+  ],
+  "description": "Everything is pinned; Renovate turns upstream releases into reviewable PRs.",
+  "schedule": [
+    "before 6am on monday"
+  ],
+  "packageRules": [
+    {
+      "description": "Low-risk patch/minor of dev tooling: automerge once CI is green",
+      "matchUpdateTypes": [
+        "patch",
+        "minor"
+      ],
+      "matchDepTypes": [
+        "devDependencies"
+      ],
+      "automerge": true
+    },
+    {
+      "description": "Group Terraform providers + modules so they're tested together",
+      "matchManagers": [
+        "terraform"
+      ],
+      "groupName": "terraform"
+    }
+  ]
+}

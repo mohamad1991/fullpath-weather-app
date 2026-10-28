@@ -8,6 +8,9 @@ image:
   tag: ""
   pullPolicy: IfNotPresent
 
+# e.g. [{ name: ghcr-pull }] for a private GHCR. Not needed on EKS (node role pulls from ECR).
+imagePullSecrets: []
+
 # Kubernetes Secret with keys: host, port, dbname, username, password.
 # Same contract for both DB backends:
 #   - local: CloudNativePG generates "<cluster>-app" with exactly these keys

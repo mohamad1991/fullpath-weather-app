@@ -17,6 +17,19 @@ help: ## Show targets
 dev: ## Run the app with docker compose (http://localhost:8080)
 	docker compose up --build
 
+.PHONY: venv
+venv: ## Create .venv with hash-locked deps
+	python3 -m venv .venv
+	. .venv/bin/activate && for c in api collector; do \
+	  pip install -q --require-hashes -r apps/$$c/requirements.txt -r apps/$$c/requirements-dev.txt || exit 1; \
+	done
+	# Tools get their own venv: checkov's pins would otherwise fight the app's lock file.
+	python3 -m venv .venv-tools && .venv-tools/bin/pip install -q checkov==3.3.30
+
+.PHONY: lock
+lock: ## Re-compile hashed lock files from requirements*.in (in python:3.12, matching the runtime)
+	scripts/lock-python.sh
+
 .PHONY: test
 test: ## Lint + unit/integration tests (needs `docker compose up -d db`)
 	. .venv/bin/activate && ruff check apps/ && ruff format --check apps/
@@ -59,4 +72,4 @@ lint-infra: ## terraform fmt/validate + helm lint + checkov
 	done
 	helm lint $(CHART) -f $(CHART)/ci/local-values.yaml --strict
 	helm lint $(CHART) -f $(CHART)/ci/aws-values.yaml --strict
-	. .venv/bin/activate && checkov -d infra --framework terraform --quiet --compact --skip-download --skip-path '\.terraform'
+	.venv-tools/bin/checkov -d infra --framework terraform --quiet --compact --skip-download --skip-path '\.terraform'

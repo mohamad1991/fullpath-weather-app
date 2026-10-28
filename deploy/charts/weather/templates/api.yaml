@@ -29,6 +29,9 @@ spec:
     spec:
       serviceAccountName: {{ $name }}
       automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
       securityContext: {{- include "weather.podSecurityContext" . | nindent 8 }}
         runAsUser: 10001
         runAsGroup: 10001

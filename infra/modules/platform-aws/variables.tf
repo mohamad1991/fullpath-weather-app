@@ -63,16 +63,34 @@ variable "chart_versions" {
     aws_lb_controller = string
     external_secrets  = string
     metrics_server    = string
+    argocd            = string
   })
   default = {
     karpenter         = "1.15.1"
     aws_lb_controller = "3.6.2"
     external_secrets  = "2.14.0"
     metrics_server    = "3.14.0"
+    argocd            = "10.11.6"
   }
 }
 
 variable "tags" {
   type    = map(string)
   default = {}
+}
+
+variable "environment" {
+  description = "Selects deploy/argocd/<environment> as the GitOps root."
+  type        = string
+}
+
+variable "gitops_repo_ssh_url" {
+  type    = string
+  default = "git@github.com:mohamad1991/fullpath-weather-app.git"
+}
+
+variable "gitops_deploy_key_secret" {
+  description = "Secrets Manager secret holding the read-only deploy key (plain text)."
+  type        = string
+  default     = "argocd/weather-deploy-key"
 }

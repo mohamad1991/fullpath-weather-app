@@ -1,0 +1,69 @@
+# Promote an already-built, already-tested image from dev to prod.
+# Nothing is rebuilt: prod runs the exact bytes (same digest) that ran in dev.
+# Output is a PR - CODEOWNERS review + merge = the production deploy (Argo CD syncs it).
+name: Promote to prod
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag (git SHA) to promote. Empty = whatever dev runs now."
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          tag="${INPUT_TAG:-$(yq '.image.tag' deploy/environments/dev/values.yaml)}"
+          [[ "$tag" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::'$tag' is not a full git SHA"; exit 1; }
+          current="$(yq '.image.tag' deploy/environments/prod/values.yaml)"
+          [ "$tag" != "$current" ] || { echo "::notice::prod already runs $tag"; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+
+      # Same installer (and so the same cosign version) that signed the images in ci.yml.
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Verify the image exists and is signed by this repo's CI
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u "${{ github.actor }}" --password-stdin
+          for c in api collector frontend; do
+            cosign verify "ghcr.io/${{ github.repository }}/$c:$TAG" \
+              --certificate-identity-regexp "^https://github.com/${{ github.repository }}/.github/workflows/ci.yml@refs/heads/main$" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null
+            echo "verified $c:$TAG"
+          done
+
+      - name: Update prod values
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: yq -i '.image.tag = strenv(TAG)' deploy/environments/prod/values.yaml
+
+      - uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          branch: promote/prod-${{ steps.tag.outputs.tag }}
+          commit-message: "deploy: prod -> ${{ steps.tag.outputs.tag }}"
+          title: "Promote to prod: ${{ steps.tag.outputs.tag }}"
+          body: |
+            Promotes the image currently validated in **dev** to **prod**.
+
+            - From: `${{ steps.tag.outputs.current }}`
+            - To: `${{ steps.tag.outputs.tag }}`
+            - Changes: https://github.com/${{ github.repository }}/compare/${{ steps.tag.outputs.current }}...${{ steps.tag.outputs.tag }}
+            - Images verified: cosign signature from `ci.yml@main`
+
+            Merging this PR deploys to prod (Argo CD auto-sync). Rollback = revert this PR.
+          labels: deploy, prod

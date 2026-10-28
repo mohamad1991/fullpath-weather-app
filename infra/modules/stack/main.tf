@@ -51,6 +51,7 @@ module "database" {
 module "platform" {
   source = "../platform-aws"
 
+  environment              = var.environment
   cluster_name             = module.eks.cluster_name
   vpc_id                   = module.network.vpc_id
   karpenter_queue_name     = module.eks.karpenter_queue_name

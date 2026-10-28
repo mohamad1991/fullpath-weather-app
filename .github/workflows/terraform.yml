@@ -1,0 +1,204 @@
+# Infrastructure pipeline.
+#   PR:         fmt + validate + checkov (always) ; plan dev+prod and comment on the PR (if AWS configured)
+#   push main:  apply dev automatically -> plan prod -> human approval -> apply THAT plan
+# AWS access is OIDC-only. Configure repo variables AWS_ACCOUNT_ID, AWS_REGION,
+# TF_STATE_BUCKET to enable the AWS jobs; until then they are skipped with a notice.
+name: Terraform
+
+on:
+  pull_request:
+    paths: ["infra/**", ".github/workflows/terraform.yml"]
+  push:
+    branches: [main]
+    paths: ["infra/**", ".github/workflows/terraform.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  # Never two applies at once. PR plans can run in parallel with each other.
+  group: terraform-${{ github.event_name == 'push' && 'apply' || github.ref }}
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: "1.17.0"
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  AWS_ENABLED: ${{ vars.AWS_ACCOUNT_ID != '' }}
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - run: terraform fmt -check -recursive infra
+      - name: Validate all roots
+        run: |
+          for d in infra/bootstrap infra/global infra/environments/*/; do
+            echo "::group::$d"
+            terraform -chdir="$d" init -backend=false
+            terraform -chdir="$d" validate
+            echo "::endgroup::"
+          done
+      - name: Checkov (IaC security)
+        uses: bridgecrewio/checkov-action@99bb2caf247dfd9f03cf984373bc6043d4e32ebf # v12.1347.0
+        with:
+          directory: infra
+          framework: terraform
+          skip_path: \.terraform
+          quiet: true
+          compact: true
+
+  plan:
+    needs: static
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [dev, prod]
+    defaults:
+      run:
+        working-directory: infra/environments/${{ matrix.env }}
+    steps:
+      - name: AWS not configured
+        if: env.AWS_ENABLED != 'true'
+        working-directory: .
+        run: echo "::notice::Skipping ${{ matrix.env }} plan - set AWS_ACCOUNT_ID / AWS_REGION / TF_STATE_BUCKET repo variables to enable."
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: env.AWS_ENABLED == 'true'
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        if: env.AWS_ENABLED == 'true'
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        if: env.AWS_ENABLED == 'true'
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/gha-weather-plan # read-only
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Plan
+        if: env.AWS_ENABLED == 'true'
+        id: plan
+        env:
+          TF_VAR_api_allowed_cidrs: ${{ vars.EKS_API_ALLOWED_CIDRS }}
+        run: |
+          terraform init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" -backend-config="region=${{ vars.AWS_REGION }}"
+          set +e
+          terraform plan -lock=false -no-color -detailed-exitcode -out=tfplan > plan.txt 2>&1
+          code=$?
+          set -e
+          cat plan.txt
+          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+          [ $code -ne 1 ]
+      - name: Comment plan on PR
+        if: always() && env.AWS_ENABLED == 'true' && steps.plan.outcome != 'skipped'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          ENV_NAME: ${{ matrix.env }}
+          EXITCODE: ${{ steps.plan.outputs.exitcode }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = `infra/environments/${process.env.ENV_NAME}/plan.txt`;
+            let plan = fs.existsSync(path) ? fs.readFileSync(path, 'utf8') : 'plan output missing';
+            if (plan.length > 60000) plan = '...(truncated)...\n' + plan.slice(-60000);
+            const status = { '0': 'No changes', '2': 'Changes', '1': 'FAILED' }[process.env.EXITCODE] ?? 'unknown';
+            const marker = `<!-- tfplan-${process.env.ENV_NAME} -->`;
+            const body = `${marker}\n### Terraform plan: \`${process.env.ENV_NAME}\` - ${status}\n<details><summary>Show plan</summary>\n\n\`\`\`\n${plan}\n\`\`\`\n</details>`;
+            const { data: comments } = await github.rest.issues.listComments({ ...context.repo, issue_number: context.issue.number });
+            const existing = comments.find(c => c.body.startsWith(marker));
+            if (existing) await github.rest.issues.updateComment({ ...context.repo, comment_id: existing.id, body });
+            else await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number, body });
+
+  apply-dev:
+    needs: static
+    if: github.event_name == 'push' && vars.AWS_ACCOUNT_ID != ''
+    runs-on: ubuntu-latest
+    environment: dev # OIDC sub = environment:dev -> matches the apply role trust policy
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: infra/environments/dev
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/gha-weather-apply
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Apply
+        env:
+          TF_VAR_api_allowed_cidrs: ${{ vars.EKS_API_ALLOWED_CIDRS }}
+        run: |
+          terraform init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" -backend-config="region=${{ vars.AWS_REGION }}"
+          terraform apply -auto-approve
+
+  plan-prod:
+    needs: apply-dev # prod only after the same change applied cleanly to dev
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: infra/environments/prod
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/gha-weather-plan
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Plan
+        env:
+          TF_VAR_api_allowed_cidrs: ${{ vars.EKS_API_ALLOWED_CIDRS }}
+        run: |
+          terraform init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" -backend-config="region=${{ vars.AWS_REGION }}"
+          terraform plan -lock=false -no-color -out=tfplan | tee plan.txt
+          { echo '### Prod plan (approve the `prod` environment to apply exactly this)'; echo '```'; cat plan.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: prod-tfplan
+          path: infra/environments/prod/tfplan
+          retention-days: 1 # plan files can contain sensitive values
+
+  apply-prod:
+    needs: plan-prod
+    runs-on: ubuntu-latest
+    environment: prod # required reviewers gate this job
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: infra/environments/prod
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: prod-tfplan
+          path: infra/environments/prod
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/gha-weather-apply
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Apply the reviewed plan
+        run: |
+          terraform init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" -backend-config="region=${{ vars.AWS_REGION }}"
+          terraform apply tfplan # fails if state changed since the plan -> no surprise changes

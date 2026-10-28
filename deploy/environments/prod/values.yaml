@@ -1,0 +1,33 @@
+# AWS prod. Values marked (tf) come from `terraform output helm_values` in infra/environments/prod.
+image:
+  registry: 123456789012.dkr.ecr.eu-west-1.amazonaws.com/weather
+  tag: set-by-ci # changed ONLY by promotion PRs (.github/workflows/promote.yml)
+database:
+  secretName: weather-db
+  externalSecret:
+    enabled: true
+    remoteKeys: # (tf)
+      - "arn:aws:secretsmanager:eu-west-1:123456789012:secret:rds!db-REPLACE"
+      - weather-prod/db-connection
+ingress:
+  className: alb
+  host: weather-prod.example.com
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:eu-west-1:123456789012:certificate/REPLACE
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+    alb.ingress.kubernetes.io/healthcheck-path: /healthz
+networkPolicy:
+  ingressFromCIDRs: ["10.20.0.0/16"] # (tf)
+  databaseCIDRs: ["10.20.100.0/24", "10.20.101.0/24", "10.20.102.0/24"] # (tf)
+serviceMonitor:
+  enabled: true
+api:
+  autoscaling: { minReplicas: 3, maxReplicas: 10 }
+frontend:
+  autoscaling: { minReplicas: 3, maxReplicas: 6 }
+# AZ-loss tolerance: refuse to schedule rather than stack replicas in one zone.
+topologySpread:
+  zoneWhenUnsatisfiable: DoNotSchedule

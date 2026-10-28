@@ -1,0 +1,254 @@
+# CI for application code and the Helm chart.
+#   PR:          test -> build -> scan            (nothing is pushed)
+#   push main:   test -> build -> scan -> push -> sign -> bump GitOps tag (dev + local)
+# Every action is pinned to a commit SHA: a moved tag can't inject code into CI.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  GHCR_REPO: ghcr.io/${{ github.repository }}
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      apps: ${{ steps.filter.outputs.apps }}
+      chart: ${{ steps.filter.outputs.chart }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        with:
+          filters: |
+            apps:
+              - 'apps/**'
+              - 'ruff.toml'
+              - '.github/workflows/ci.yml'
+            chart:
+              - 'deploy/**'
+              - '.github/workflows/ci.yml'
+
+  test-python:
+    needs: changes
+    if: needs.changes.outputs.apps == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [api, collector]
+    services:
+      # Real Postgres for the API integration tests - same engine/major as prod.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: weather
+          POSTGRES_USER: weather
+          POSTGRES_PASSWORD: ci-only
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U weather" --health-interval 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: apps/${{ matrix.component }}/requirements*.txt
+      - name: Install (hash-locked)
+        run: >-
+          pip install --require-hashes
+          -r apps/${{ matrix.component }}/requirements.txt
+          -r apps/${{ matrix.component }}/requirements-dev.txt
+      - name: Lint
+        run: ruff check apps/${{ matrix.component }} && ruff format --check apps/${{ matrix.component }}
+      - name: Test
+        working-directory: apps/${{ matrix.component }}
+        env:
+          DB_HOST: localhost
+          DB_PASSWORD: ci-only
+          DB_SSLMODE: disable
+        run: python -m pytest -q
+
+  test-frontend:
+    needs: changes
+    if: needs.changes.outputs.apps == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/frontend/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
+  lint-chart:
+    needs: changes
+    if: needs.changes.outputs.chart == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      - name: Install kubeconform
+        run: |
+          curl -fsSL -o /tmp/kc.tgz https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz
+          tar -xzf /tmp/kc.tgz -C /usr/local/bin kubeconform
+      - name: Lint + schema-validate every environment
+        run: |
+          for env in local dev prod; do
+            echo "::group::$env"
+            helm lint deploy/charts/weather -f deploy/environments/$env/values.yaml --set image.tag=ci --strict
+            helm template weather deploy/charts/weather -f deploy/environments/$env/values.yaml --set image.tag=ci \
+              | kubeconform -strict -summary -ignore-missing-schemas \
+                  -schema-location default \
+                  -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+            echo "::endgroup::"
+          done
+
+  build:
+    needs: [changes, test-python, test-frontend]
+    # Run when app code changed and tests passed (skipped tests count as "not run" -> guard explicitly).
+    if: >-
+      always() && needs.changes.outputs.apps == 'true' &&
+      needs.test-python.result == 'success' && needs.test-frontend.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # push to GHCR
+      id-token: write # cosign keyless signing + AWS OIDC
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [api, collector, frontend]
+    env:
+      PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      ECR_ENABLED: ${{ vars.AWS_ACCOUNT_ID != '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build (local, for scanning)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: apps/${{ matrix.component }}
+          load: true
+          tags: scan/${{ matrix.component }}:${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+
+      # Gate: fail on HIGH/CRITICAL vulnerabilities that have a fix available.
+      # Unfixable CVEs are reported, not blocking (nothing actionable; tracked via rebuilds).
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: scan/${{ matrix.component }}:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+      - name: Log in to GHCR
+        if: env.PUSH == 'true'
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: AWS credentials (OIDC, no static keys)
+        if: env.PUSH == 'true' && env.ECR_ENABLED == 'true'
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/gha-weather-build
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Log in to ECR
+        if: env.PUSH == 'true' && env.ECR_ENABLED == 'true'
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com
+
+      - name: Image tags
+        if: env.PUSH == 'true'
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          # Immutable git-SHA tags only. No "latest": what runs is always traceable to a commit.
+          images: |
+            ${{ env.GHCR_REPO }}/${{ matrix.component }}
+            name=${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com/weather/${{ matrix.component }},enable=${{ env.ECR_ENABLED }}
+          tags: type=sha,format=long,prefix=
+
+      - name: Push (rebuild is a cache hit)
+        if: env.PUSH == 'true'
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: apps/${{ matrix.component }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+          provenance: mode=max # SLSA build provenance attestation
+          sbom: true # SBOM attached to the image
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        if: env.PUSH == 'true'
+
+      # Keyless signature bound to this repo + workflow identity (Sigstore/Fulcio).
+      # Verify: cosign verify --certificate-identity-regexp 'github.com/<repo>/' \
+      #   --certificate-oidc-issuer https://token.actions.githubusercontent.com <image>@<digest>
+      - name: Sign images
+        if: env.PUSH == 'true'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          for tag in $TAGS; do cosign sign --yes "${tag%%:*}@${DIGEST}"; done
+
+  # GitOps: record the new image tag in Git. Argo CD notices and rolls it out.
+  # Only dev + local auto-deploy; prod moves via promote.yml (reviewed PR).
+  bump-gitops:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: bump-gitops # serialize bumps so two merges can't race on the same file
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+      - name: Set image tag for dev + local
+        run: |
+          for env in local dev; do
+            yq -i '.image.tag = strenv(GITHUB_SHA)' deploy/environments/$env/values.yaml
+          done
+          git diff --stat
+      - name: Commit
+        # Commits made with GITHUB_TOKEN don't trigger workflows -> no CI loop.
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "deploy: dev+local -> ${GITHUB_SHA::12}" || { echo "nothing to bump"; exit 0; }
+          git pull --rebase origin main
+          git push origin HEAD:main

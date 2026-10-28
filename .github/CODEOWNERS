@@ -1,0 +1,6 @@
+# Branch protection "require review from Code Owners" makes these mandatory reviewers.
+*                                   @mohamad1991
+/infra/                             @mohamad1991
+/.github/workflows/                 @mohamad1991
+# Production deploys (promotion PRs) need an owner's approval.
+/deploy/environments/prod/          @mohamad1991

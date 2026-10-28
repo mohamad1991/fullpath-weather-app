@@ -2,6 +2,7 @@
 # Application workloads are NOT here - Argo CD deploys those from Git.
 
 data "aws_region" "current" {}
+data "aws_caller_identity" "current" {}
 
 locals {
   manifests_chart = "${path.module}/../../charts/manifests"
@@ -148,9 +149,13 @@ module "external_secrets_identity" {
   name                           = "${var.cluster_name}-external-secrets"
   attach_external_secrets_policy = true
   # Least privilege: only the two secrets this app needs, read-only.
-  external_secrets_secrets_manager_arns = [var.db_master_secret_arn, aws_secretsmanager_secret.db_connection.arn]
-  external_secrets_kms_key_arns         = [var.db_kms_key_arn]
-  external_secrets_create_permission    = false
+  external_secrets_secrets_manager_arns = [
+    var.db_master_secret_arn,
+    aws_secretsmanager_secret.db_connection.arn,
+    "arn:aws:secretsmanager:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:secret:${var.gitops_deploy_key_secret}-*",
+  ]
+  external_secrets_kms_key_arns      = [var.db_kms_key_arn]
+  external_secrets_create_permission = false
 
   associations = {
     this = {
@@ -193,7 +198,7 @@ resource "helm_release" "secret_store" {
           aws = { service = "SecretsManager", region = data.aws_region.current.region }
         }
         # Restrict which namespaces may use this store.
-        conditions = [{ namespaces = [var.app_namespace] }]
+        conditions = [{ namespaces = [var.app_namespace, "argocd"] }]
       }
     }]
   })]
@@ -223,4 +228,73 @@ resource "kubernetes_namespace_v1" "app" {
       "pod-security.kubernetes.io/warn"    = "restricted"
     }
   }
+}
+
+# --- GitOps: Argo CD ----------------------------------------------------------------
+
+resource "helm_release" "argocd" {
+  name             = "argocd"
+  namespace        = "argocd"
+  create_namespace = true
+  repository       = "https://argoproj.github.io/argo-helm"
+  chart            = "argo-cd"
+  version          = var.chart_versions.argocd
+  wait             = true
+
+  values = [yamlencode({
+    global = { nodeSelector = { "node-role" = "system" } }
+    # HA control plane: Argo CD down = no deploys (running apps are unaffected).
+    redis-ha       = { enabled = true }
+    controller     = { replicas = 1 } # sharded controller; 1 is enough for one cluster
+    server         = { replicas = 2 }
+    repoServer     = { replicas = 2 }
+    applicationSet = { replicas = 2 }
+    # UI/API stay private: reach via kubectl port-forward or an internal ALB + SSO.
+    configs = { cm = { "timeout.reconciliation" = "60s" } }
+  })]
+
+  depends_on = [helm_release.karpenter_nodepools]
+}
+
+# Repo credential = read-only GitHub deploy key (SSH) kept in Secrets Manager
+# (created out-of-band: `gh repo deploy-key add`), synced by External Secrets.
+resource "helm_release" "argocd_bootstrap" {
+  name      = "argocd-bootstrap"
+  namespace = "argocd"
+  chart     = local.manifests_chart
+
+  values = [yamlencode({
+    manifests = [
+      {
+        apiVersion = "external-secrets.io/v1"
+        kind       = "ExternalSecret"
+        metadata   = { name = "repo-weather", namespace = "argocd" }
+        spec = {
+          refreshInterval = "1h"
+          secretStoreRef  = { kind = "ClusterSecretStore", name = "aws-secrets-manager" }
+          target = {
+            name = "repo-weather"
+            template = {
+              metadata = { labels = { "argocd.argoproj.io/secret-type" = "repository" } }
+              data     = { type = "git", url = var.gitops_repo_ssh_url, sshPrivateKey = "{{ .sshPrivateKey }}" }
+            }
+          }
+          data = [{ secretKey = "sshPrivateKey", remoteRef = { key = var.gitops_deploy_key_secret } }]
+        }
+      },
+      {
+        apiVersion = "argoproj.io/v1alpha1"
+        kind       = "Application"
+        metadata   = { name = "root", namespace = "argocd" }
+        spec = {
+          project     = "default"
+          source      = { repoURL = var.gitops_repo_ssh_url, targetRevision = "main", path = "deploy/argocd/${var.environment}" }
+          destination = { server = "https://kubernetes.default.svc", namespace = "argocd" }
+          syncPolicy  = { automated = { prune = true, selfHeal = true } }
+        }
+      },
+    ]
+  })]
+
+  depends_on = [helm_release.argocd, helm_release.secret_store]
 }

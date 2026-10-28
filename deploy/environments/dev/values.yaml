@@ -1,0 +1,30 @@
+# AWS dev. Values marked (tf) come from `terraform output helm_values` in infra/environments/dev.
+image:
+  registry: 123456789012.dkr.ecr.eu-west-1.amazonaws.com/weather
+  tag: set-by-ci # bumped automatically by CI on every merge to main
+database:
+  secretName: weather-db
+  externalSecret:
+    enabled: true
+    remoteKeys: # (tf)
+      - "arn:aws:secretsmanager:eu-west-1:123456789012:secret:rds!db-REPLACE"
+      - weather-dev/db-connection
+ingress:
+  className: alb
+  host: weather-dev.example.com
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:eu-west-1:123456789012:certificate/REPLACE
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+    alb.ingress.kubernetes.io/healthcheck-path: /healthz
+networkPolicy:
+  ingressFromCIDRs: ["10.10.0.0/16"] # (tf)
+  databaseCIDRs: ["10.10.100.0/24", "10.10.101.0/24", "10.10.102.0/24"] # (tf)
+serviceMonitor:
+  enabled: true
+api:
+  autoscaling: { minReplicas: 2, maxReplicas: 4 }
+frontend:
+  autoscaling: { minReplicas: 2, maxReplicas: 3 }
