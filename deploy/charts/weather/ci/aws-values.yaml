@@ -1,7 +1,9 @@
 image: { registry: 123456789012.dkr.ecr.eu-west-1.amazonaws.com/weather, tag: abc1234 }
 database:
   secretName: weather-db
-  externalSecret: { enabled: true, remoteKey: weather/prod/db }
+  externalSecret:
+    enabled: true
+    remoteKeys: ["arn:aws:secretsmanager:eu-west-1:123456789012:secret:rds!db-abc", weather-prod/db-connection]
 ingress:
   className: alb
   host: weather.example.com

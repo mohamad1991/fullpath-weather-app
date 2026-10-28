@@ -1,0 +1,8 @@
+apiVersion: v2
+name: manifests
+description: >
+  Applies arbitrary manifests (mostly CRs) from Terraform via helm_release.
+  Avoids kubernetes_manifest's plan-time CRD lookup, which fails on a fresh cluster
+  before the operator that installs the CRD exists.
+type: application
+version: 0.1.0

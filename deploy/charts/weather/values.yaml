@@ -18,7 +18,7 @@ database:
   externalSecret:
     enabled: false
     secretStoreRef: { name: aws-secrets-manager, kind: ClusterSecretStore }
-    remoteKey: ""          # Secrets Manager secret name/ARN (JSON with the keys above)
+    remoteKeys: []         # Secrets Manager names/ARNs; JSON keys are merged into the Secret
     refreshInterval: 1h
 
 ingress:
