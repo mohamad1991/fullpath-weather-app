@@ -1,0 +1,43 @@
+{{- if .Values.migrations.enabled }}
+{{- $ctx := dict "ctx" $ "component" "migrations" }}
+{{- $name := printf "%s-migrations" (include "weather.fullname" .) }}
+# Runs BEFORE the new API version rolls out. Helm runs it as a pre-install/pre-upgrade
+# hook; Argo CD maps these hooks to its PreSync phase - so the same chart works for both.
+# If it fails, the release/sync stops and the old API keeps serving.
+# Rule for developers: migrations must be backward compatible (expand -> migrate -> contract),
+# because old pods keep running against the new schema during the rollout.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}
+  labels: {{- include "weather.labels" $ctx | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels: {{- include "weather.labels" $ctx | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext: {{- include "weather.podSecurityContext" . | nindent 8 }}
+        runAsUser: 10001
+        runAsGroup: 10001
+      containers:
+        - name: migrate
+          image: {{ include "weather.image" (dict "ctx" $ "component" "api") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "app.migrate"]
+          env: {{- include "weather.dbEnv" . | nindent 12 }}
+          securityContext: {{- include "weather.containerSecurityContext" . | nindent 12 }}
+          resources: {{- toYaml .Values.migrations.resources | nindent 12 }}
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: { sizeLimit: 16Mi }
+{{- end }}

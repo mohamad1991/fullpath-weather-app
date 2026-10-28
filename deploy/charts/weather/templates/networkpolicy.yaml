@@ -1,0 +1,137 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $np := .Values.networkPolicy }}
+# Zero-trust baseline: deny all traffic for this release's pods, then allow only
+# the flows the architecture needs. Blast radius of a compromised pod = its allowed flows.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "weather.fullname" . }}-default-deny
+  labels: {{- include "weather.labels" (dict "ctx" $ "component" "network") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: [Ingress, Egress]
+---
+# DNS for everyone.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "weather.fullname" . }}-allow-dns
+  labels: {{- include "weather.labels" (dict "ctx" $ "component" "network") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+          podSelector: { matchLabels: { k8s-app: kube-dns } }
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# Ingress controller -> frontend and API.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "weather.fullname" . }}-allow-ingress-controller
+  labels: {{- include "weather.labels" (dict "ctx" $ "component" "network") | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: app.kubernetes.io/instance, operator: In, values: [{{ .Release.Name }}] }
+      - { key: app.kubernetes.io/component, operator: In, values: [frontend, api] }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        {{- if $np.ingressFromCIDRs }}
+        # AWS ALB (target-type: ip) reaches pods directly from the VPC subnets.
+        {{- range $np.ingressFromCIDRs }}
+        - ipBlock: { cidr: {{ . }} }
+        {{- end }}
+        {{- else }}
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: {{ $np.ingressControllerNamespace }} } }
+        {{- end }}
+      ports:
+        - { protocol: TCP, port: {{ .Values.frontend.port }} }
+        - { protocol: TCP, port: {{ .Values.api.port }} }
+    {{- if .Values.serviceMonitor.enabled }}
+    # Prometheus scrapes /metrics.
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: monitoring } }
+      ports:
+        - { protocol: TCP, port: {{ .Values.api.port }} }
+    {{- end }}
+---
+# Frontend -> API (nginx /api proxy fallback).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "weather.fullname" . }}-frontend-to-api
+  labels: {{- include "weather.labels" (dict "ctx" $ "component" "network") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "weather.selectorLabels" (dict "ctx" $ "component" "api") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {{- include "weather.selectorLabels" (dict "ctx" $ "component" "frontend") | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: {{ .Values.api.port }} }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "weather.fullname" . }}-frontend-egress
+  labels: {{- include "weather.labels" (dict "ctx" $ "component" "network") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "weather.selectorLabels" (dict "ctx" $ "component" "frontend") | nindent 6 }}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: {{- include "weather.selectorLabels" (dict "ctx" $ "component" "api") | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: {{ .Values.api.port }} }
+---
+# API, collector and migrations -> Postgres only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "weather.fullname" . }}-allow-db
+  labels: {{- include "weather.labels" (dict "ctx" $ "component" "network") | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: app.kubernetes.io/instance, operator: In, values: [{{ .Release.Name }}] }
+      - { key: app.kubernetes.io/component, operator: In, values: [api, collector, migrations] }
+  policyTypes: [Egress]
+  egress:
+    - to: {{- include "weather.dbEgressPeers" . | nindent 8 }}
+      ports:
+        - { protocol: TCP, port: 5432 }
+---
+# Collector -> Open-Meteo over HTTPS. NetworkPolicy can't match on FQDN, so this is
+# "public internet on 443, excluding private ranges". Tighter option: egress via a
+# proxy / Cilium FQDN policy (documented as a follow-up in the ADR).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "weather.fullname" . }}-collector-internet
+  labels: {{- include "weather.labels" (dict "ctx" $ "component" "network") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "weather.selectorLabels" (dict "ctx" $ "component" "collector") | nindent 6 }}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16]
+      ports:
+        - { protocol: TCP, port: 443 }
+{{- end }}

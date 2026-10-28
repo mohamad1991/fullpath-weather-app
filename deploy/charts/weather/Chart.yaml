@@ -1,0 +1,6 @@
+apiVersion: v2
+name: weather
+description: Weather app - API, collector, frontend and DB migrations as one release unit
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

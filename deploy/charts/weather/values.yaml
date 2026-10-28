@@ -1,0 +1,104 @@
+# Defaults are production-shaped (HA, hardened). Environments override in
+# deploy/environments/<env>/values.yaml - never edit defaults for one env.
+
+image:
+  # e.g. <account>.dkr.ecr.<region>.amazonaws.com/weather  (component name is appended)
+  registry: ghcr.io/example/weather
+  # Set by CI (GitOps bump) to the immutable git SHA tag. Never "latest".
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Kubernetes Secret with keys: host, port, dbname, username, password.
+# Same contract for both DB backends:
+#   - local: CloudNativePG generates "<cluster>-app" with exactly these keys
+#   - AWS:   External Secrets Operator syncs it from Secrets Manager (see externalSecret)
+database:
+  secretName: weather-db-app
+  sslmode: require
+  externalSecret:
+    enabled: false
+    secretStoreRef: { name: aws-secrets-manager, kind: ClusterSecretStore }
+    remoteKey: ""          # Secrets Manager secret name/ARN (JSON with the keys above)
+    refreshInterval: 1h
+
+ingress:
+  enabled: true
+  className: traefik        # "alb" on EKS (AWS Load Balancer Controller)
+  host: ""                  # empty = any host (local)
+  annotations: {}
+  tls: []                   # [{ secretName, hosts: [] }] - on AWS TLS terminates at the ALB (ACM)
+
+networkPolicy:
+  enabled: true
+  # Namespace of the ingress controller allowed to reach frontend/api.
+  ingressControllerNamespace: traefik
+  # On EKS with ALB target-type=ip, traffic comes from the VPC - set the VPC/public-subnet CIDRs.
+  ingressFromCIDRs: []
+  # CIDRs the API/collector/migrations may reach Postgres on (RDS subnets on AWS).
+  # Leave empty when the DB runs in-cluster (databasePodSelector is used instead).
+  databaseCIDRs: []
+  databasePodSelector:
+    namespaceSelector: {}   # {} = same namespace
+    podSelector: { cnpg.io/cluster: weather-db }
+
+serviceMonitor:
+  enabled: false            # requires Prometheus Operator CRDs (Phase 5)
+  interval: 30s
+
+api:
+  enabled: true
+  replicas: 2
+  port: 8000
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { memory: 256Mi }    # no CPU limit: avoids CFS throttling; requests drive scheduling/HPA
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  pdb: { maxUnavailable: 1 }
+  env:
+    DB_POOL_MAX: "10"
+
+frontend:
+  enabled: true
+  replicas: 2
+  port: 8080
+  resources:
+    requests: { cpu: 50m, memory: 32Mi }
+    limits: { memory: 64Mi }
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+  pdb: { maxUnavailable: 1 }
+
+collector:
+  enabled: true
+  schedule: "*/15 * * * *"
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { memory: 128Mi }
+  locations:
+    - { name: Tel Aviv, country: IL, latitude: 32.0853, longitude: 34.7818, timezone: Asia/Jerusalem }
+    - { name: New York, country: US, latitude: 40.7128, longitude: -74.0060, timezone: America/New_York }
+    - { name: London, country: GB, latitude: 51.5074, longitude: -0.1278, timezone: Europe/London }
+    - { name: Tokyo, country: JP, latitude: 35.6762, longitude: 139.6503, timezone: Asia/Tokyo }
+    - { name: Sydney, country: AU, latitude: -33.8688, longitude: 151.2093, timezone: Australia/Sydney }
+    - { name: Sao Paulo, country: BR, latitude: -23.5505, longitude: -46.6333, timezone: America/Sao_Paulo }
+    - { name: Detroit, country: US, latitude: 42.3314, longitude: -83.0458, timezone: America/Detroit }
+    - { name: Berlin, country: DE, latitude: 52.5200, longitude: 13.4050, timezone: Europe/Berlin }
+
+migrations:
+  enabled: true
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { memory: 128Mi }
+
+# Spread replicas across zones (HA vs AZ failure) and nodes (HA vs node failure).
+# ScheduleAnyway on hostname so a single-node kind cluster still schedules.
+topologySpread:
+  enabled: true
+  zoneWhenUnsatisfiable: ScheduleAnyway

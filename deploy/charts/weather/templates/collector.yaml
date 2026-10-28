@@ -1,0 +1,65 @@
+{{- if .Values.collector.enabled }}
+{{- $ctx := dict "ctx" $ "component" "collector" }}
+{{- $name := printf "%s-collector" (include "weather.fullname" .) }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  labels: {{- include "weather.labels" $ctx | nindent 4 }}
+automountServiceAccountToken: false
+---
+# Locations are config, not code: adding a city is a values change + GitOps sync,
+# no image rebuild.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  labels: {{- include "weather.labels" $ctx | nindent 4 }}
+data:
+  locations.json: {{ .Values.collector.locations | toJson | quote }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $name }}
+  labels: {{- include "weather.labels" $ctx | nindent 4 }}
+spec:
+  schedule: {{ .Values.collector.schedule | quote }}
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid       # never two runs at once (inserts are idempotent anyway)
+  startingDeadlineSeconds: 300    # if the controller was down, still run a late job - but not ancient ones
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5       # keep failures around for debugging
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 300  # a hung run must not block the next schedule (Forbid)
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels: {{- include "weather.labels" $ctx | nindent 12 }}
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ $name }}
+          automountServiceAccountToken: false
+          securityContext: {{- include "weather.podSecurityContext" . | nindent 12 }}
+            runAsUser: 10001
+            runAsGroup: 10001
+          containers:
+            - name: collector
+              image: {{ include "weather.image" $ctx }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              env:
+                {{- include "weather.dbEnv" . | nindent 16 }}
+                - { name: LOCATIONS_FILE, value: /config/locations.json }
+              securityContext: {{- include "weather.containerSecurityContext" . | nindent 16 }}
+              resources: {{- toYaml .Values.collector.resources | nindent 16 }}
+              volumeMounts:
+                - { name: config, mountPath: /config, readOnly: true }
+                - { name: tmp, mountPath: /tmp }
+          volumes:
+            - name: config
+              configMap: { name: {{ $name }} }
+            - name: tmp
+              emptyDir: { sizeLimit: 16Mi }
+{{- end }}

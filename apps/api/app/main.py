@@ -29,6 +29,11 @@ async def lifespan(_: FastAPI):
         min_size=config.POOL_MIN,
         max_size=config.POOL_MAX,
         kwargs={"row_factory": dict_row},
+        # After a DB failover (CNPG promotion / RDS Multi-AZ DNS flip) pooled connections
+        # point at the dead primary. Validate on checkout so they're silently replaced
+        # instead of surfacing as 500s, and recycle periodically.
+        check=ConnectionPool.check_connection,
+        max_lifetime=config.POOL_MAX_LIFETIME,
         open=False,
     )
     pool.open(wait=False)

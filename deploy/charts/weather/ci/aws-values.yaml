@@ -1,0 +1,15 @@
+image: { registry: 123456789012.dkr.ecr.eu-west-1.amazonaws.com/weather, tag: abc1234 }
+database:
+  secretName: weather-db
+  externalSecret: { enabled: true, remoteKey: weather/prod/db }
+ingress:
+  className: alb
+  host: weather.example.com
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+networkPolicy:
+  ingressFromCIDRs: [10.0.0.0/16]
+  databaseCIDRs: [10.0.20.0/24, 10.0.21.0/24, 10.0.22.0/24]
+serviceMonitor: { enabled: true }
+topologySpread: { zoneWhenUnsatisfiable: DoNotSchedule }

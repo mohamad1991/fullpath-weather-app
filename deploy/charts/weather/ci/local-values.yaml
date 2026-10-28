@@ -1,0 +1,2 @@
+image: { registry: weather, tag: dev, pullPolicy: Never }
+database: { secretName: weather-db-app, sslmode: require }

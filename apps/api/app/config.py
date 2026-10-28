@@ -23,4 +23,5 @@ def database_conninfo() -> str:
 
 POOL_MIN = int(os.environ.get("DB_POOL_MIN", "1"))
 POOL_MAX = int(os.environ.get("DB_POOL_MAX", "10"))
+POOL_MAX_LIFETIME = float(os.environ.get("DB_POOL_MAX_LIFETIME", "600"))
 MAX_HISTORY_HOURS = int(os.environ.get("MAX_HISTORY_HOURS", "720"))  # 30 days
