@@ -1,0 +1,49 @@
+# Developer inner loop only: `docker compose up --build` -> http://localhost:8080
+# Not a deployment target - Kubernetes (kind locally, EKS in AWS) is.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: weather
+      POSTGRES_USER: weather
+      POSTGRES_PASSWORD: weather-local-only
+    ports: ["55432:5432"]  # non-default host port, avoids clashing with a local Postgres
+    volumes: [dbdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U weather -d weather"]
+      interval: 3s
+      retries: 20
+
+  migrate:
+    build: ./apps/api
+    command: ["python", "-m", "app.migrate"]
+    environment: &db
+      DB_HOST: db
+      DB_NAME: weather
+      DB_USER: weather
+      DB_PASSWORD: weather-local-only
+      DB_SSLMODE: disable
+    depends_on:
+      db: { condition: service_healthy }
+
+  api:
+    build: ./apps/api
+    environment: *db
+    ports: ["8000:8000"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  # Runs once on `up`. Re-run with: docker compose run --rm collector
+  collector:
+    build: ./apps/collector
+    environment: *db
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  frontend:
+    build: ./apps/frontend
+    ports: ["8080:8080"]
+    depends_on: [api]
+
+volumes:
+  dbdata:

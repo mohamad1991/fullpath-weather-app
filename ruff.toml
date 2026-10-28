@@ -1,0 +1,12 @@
+line-length = 120
+target-version = "py312"
+
+[lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+ignore = ["S101"]  # assert is fine in tests
+
+[lint.per-file-ignores]
+"apps/api/app/main.py" = ["S608"]  # static SQL, parameters are bound - not injection
+
+[lint.isort]
+known-first-party = ["app", "collector"]
