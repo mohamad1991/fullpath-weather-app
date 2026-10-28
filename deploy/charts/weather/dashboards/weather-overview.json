@@ -313,7 +313,8 @@
           "unit": "reqps",
           "custom": {
             "fillOpacity": 10
-          }
+          },
+          "noValue": "0 (no errors)"
         },
         "overrides": []
       },

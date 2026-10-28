@@ -16,7 +16,7 @@ output "argocd" {
 }
 
 output "grafana" {
-  value = "kubectl -n monitoring port-forward svc/kps-grafana 3000:80  ->  http://localhost:3000  (admin / terraform output -raw grafana_admin_password)"
+  value = "kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3300:80  ->  http://localhost:3300  (admin / terraform output -raw grafana_admin_password)"
 }
 
 output "grafana_admin_password" {
