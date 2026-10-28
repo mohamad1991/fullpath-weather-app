@@ -22,7 +22,10 @@ env:
 jobs:
   changes:
     runs-on: ubuntu-latest
+    # Job-level permissions REPLACE the workflow-level block, so contents: read
+    # must be repeated here or checkout can't read this private repo.
     permissions:
+      contents: read
       pull-requests: read
     outputs:
       apps: ${{ steps.filter.outputs.apps }}

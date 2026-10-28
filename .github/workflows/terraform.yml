@@ -43,14 +43,15 @@ jobs:
             terraform -chdir="$d" validate
             echo "::endgroup::"
           done
-      - name: Checkov (IaC security)
-        uses: bridgecrewio/checkov-action@99bb2caf247dfd9f03cf984373bc6043d4e32ebf # v12.1347.0
+      # Same pinned Checkov as `make lint-infra` (not the checkov-action, whose bundled
+      # version differed and produced false positives): local and CI must agree.
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          directory: infra
-          framework: terraform
-          skip_path: \.terraform
-          quiet: true
-          compact: true
+          python-version: "3.12"
+      - name: Checkov (IaC security)
+        run: |
+          pip install checkov==3.3.30
+          checkov -d infra --framework terraform --quiet --compact --skip-download --skip-path '\.terraform'
 
   plan:
     needs: static
